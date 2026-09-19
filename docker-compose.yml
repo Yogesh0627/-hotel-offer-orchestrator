@@ -1,0 +1,105 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: hotel-offer-redis
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: hotel-offer-postgres
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+      POSTGRES_DB: temporal
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U temporal -d temporal']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    container_name: hotel-offer-temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '7233:7233'
+    environment:
+      DB: postgres12
+      DB_PORT: 5432
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_SEEDS: postgres
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hotel-offer-api
+    depends_on:
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+    ports:
+      - '3000:3000'
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      REDIS_URL: redis://redis:6379
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: hotel-offer-task-queue
+      SUPPLIER_BASE_URL: http://api:3000
+      MOCK_SUPPLIER_A_DOWN: ${MOCK_SUPPLIER_A_DOWN:-false}
+      MOCK_SUPPLIER_B_DOWN: ${MOCK_SUPPLIER_B_DOWN:-false}
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3000/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hotel-offer-worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      temporal:
+        condition: service_started
+      api:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      REDIS_URL: redis://redis:6379
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_NAMESPACE: default
+      TEMPORAL_TASK_QUEUE: hotel-offer-task-queue
+      SUPPLIER_BASE_URL: http://api:3000
+      MOCK_SUPPLIER_A_DOWN: ${MOCK_SUPPLIER_A_DOWN:-false}
+      MOCK_SUPPLIER_B_DOWN: ${MOCK_SUPPLIER_B_DOWN:-false}
+    command: ['node', 'dist/temporal/worker.js']
+
+volumes:
+  redis_data:
+  postgres_data:
